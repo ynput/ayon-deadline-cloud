@@ -65,6 +65,7 @@ class CreateDeadlineCloudJob(plugin.MayaCreator):
             RenderSubmitterUISettings,
         )
         from deadline.maya_submitter.maya_render_submitter import (
+            create_submission_context,
             get_job_template_for_submission,
             get_parameter_values_for_submission,
             get_queue_parameters,
@@ -73,11 +74,13 @@ class CreateDeadlineCloudJob(plugin.MayaCreator):
         settings = RenderSubmitterUISettings()
         queue_parameters: list[dict[str, Any]] = get_queue_parameters()
 
-        # this would be 'job_bundle/template.yaml'
-        job_template = get_job_template_for_submission(settings)
-        # this would be 'job_bundle/parameter_values.yaml'
+        # Compute scene data once and share across both calls
+        context = create_submission_context()
+
+        job_template = get_job_template_for_submission(
+            settings, context=context)
         parameter_values = get_parameter_values_for_submission(
-            settings, queue_parameters)
+            settings, queue_parameters, context=context)
 
         parameter_values_dict = {
             i["name"]: i["value"]

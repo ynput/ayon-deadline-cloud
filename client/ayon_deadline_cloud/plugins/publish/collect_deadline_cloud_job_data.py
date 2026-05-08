@@ -14,6 +14,7 @@ from deadline import client
 from deadline.client.job_bundle.submission import AssetReferences
 from deadline.maya_submitter.data_classes import RenderSubmitterUISettings
 from deadline.maya_submitter.maya_render_submitter import (
+    create_submission_context,
     get_asset_references_for_submission,
     get_job_template_for_submission,
     get_parameter_values_for_submission,
@@ -76,9 +77,12 @@ class CollectDeadlineCloudJobData(
         queue_parameters: list[dict[str, Any]] = get_queue_parameters()
         attr_values = self.get_attr_values_from_data(instance.data)
 
-        job_template = self._build_job_template(settings, instance)
+        # Compute scene data once and share across template + parameter calls
+        context = create_submission_context()
+
+        job_template = self._build_job_template(settings, instance, context)
         parameter_values = get_parameter_values_for_submission(
-            settings, queue_parameters)
+            settings, queue_parameters, context=context)
         pv_by_name: dict[str, dict] = {
             pv["name"]: pv for pv in parameter_values
         }
@@ -125,18 +129,21 @@ class CollectDeadlineCloudJobData(
     def _build_job_template(
         settings: RenderSubmitterUISettings,
         instance: pyblish.api.Instance,
+        context=None,
     ) -> dict[str, Any]:
         """Build and return the job template, ensuring it has a name.
 
         Args:
             settings: Render submitter UI settings.
             instance: Pyblish instance (used to derive a fallback job name).
+            context: Optional pre-computed SubmissionContext.
 
         Returns:
             Job template dict.
 
         """
-        job_template = get_job_template_for_submission(settings)
+        job_template = get_job_template_for_submission(
+            settings, context=context)
         if not job_template.get("name"):
             src_file: str = instance.context.data.get("currentFile", "")
             basename = os.path.basename(src_file) if src_file else ""
