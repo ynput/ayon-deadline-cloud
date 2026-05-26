@@ -110,9 +110,17 @@ class CollectDeadlineCloudJobData(
         )
         attr_values = self.get_attr_values_from_data(instance.data)
 
-        job_template = self._build_job_template(settings, instance)
+        # Compute scene data once and share across template + parameter calls
+        context = (
+            submitter_bg.create_submission_context()
+            if submitter_bg.create_submission_context is not None
+            else None
+        )
+
+        job_template = self._build_job_template(
+            submitter_bg, settings, instance, context)
         parameter_values = submitter_bg.get_parameter_values_for_submission(
-            settings, queue_parameters
+            settings, queue_parameters, context=context
         )
         pv_by_name: dict[str, dict] = {
             pv["name"]: pv for pv in parameter_values
@@ -257,24 +265,25 @@ class CollectDeadlineCloudJobData(
 
     @staticmethod
     def _build_job_template(
+        submitter_bg: Any,  # noqa: ANN401
         settings: Any,  # noqa: ANN401
         instance: pyblish.api.Instance,
+        context: Any = None,  # noqa: ANN401
     ) -> dict[str, Any]:
         """Build and return the job template, ensuring it has a name.
 
         Args:
+            submitter_bg: SubmitterBridge for the current host.
             settings: Render submitter settings.
             instance: Pyblish instance (used to derive a fallback job name).
+            context: Optional pre-computed SubmissionContext.
 
         Returns:
             Job template dict.
 
         """
-        submitter_bg = get_submitter_bridge(
-            host_name=get_current_host_name(),
-            instance=instance,
-        )
-        job_template = submitter_bg.get_job_template_for_submission(settings)
+        job_template = submitter_bg.get_job_template_for_submission(
+            settings, context=context)
         if not job_template.get("name"):
             src_file: str = instance.context.data.get("currentFile", "")
             basename = os.path.basename(src_file) if src_file else ""

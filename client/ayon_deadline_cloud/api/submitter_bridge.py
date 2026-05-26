@@ -1,6 +1,6 @@
 """Data classes for settings across the hosts."""
-from dataclasses import dataclass
-from typing import Any, Callable
+from dataclasses import dataclass, field
+from typing import Any, Callable, Optional
 
 import pyblish.api
 
@@ -22,6 +22,7 @@ class SubmitterBridge:
     get_parameter_values_for_submission: Callable
     get_queue_parameters: Callable
     get_asset_references_for_submission: Callable
+    create_submission_context: Optional[Callable] = field(default=None)
 
 
 def get_submitter_bridge(
@@ -44,6 +45,7 @@ def get_submitter_bridge(
             RenderSubmitterUISettings,
         )
         from deadline.maya_submitter.maya_render_submitter import (
+            create_submission_context,
             get_asset_references_for_submission,
             get_job_template_for_submission,
             get_parameter_values_for_submission,
@@ -55,6 +57,7 @@ def get_submitter_bridge(
             get_parameter_values_for_submission=get_parameter_values_for_submission,
             get_queue_parameters=get_queue_parameters,
             get_asset_references_for_submission=get_asset_references_for_submission,
+            create_submission_context=create_submission_context,
         )
 
     if host_name == "houdini":
