@@ -15,7 +15,7 @@ import platform
 from dataclasses import dataclass, field
 from pathlib import Path
 from pprint import pformat
-from typing import TYPE_CHECKING, Any, ClassVar, Self
+from typing import TYPE_CHECKING, Any, ClassVar
 from urllib.parse import urlencode
 
 import ayon_api
@@ -25,24 +25,15 @@ from ayon_core.pipeline.publish import PublishError
 from ayon_deadline_cloud.addon import (
     DeadlineCloudAddon,
 )
-from botocore.exceptions import (
-    ClientError,
-)
-
-# from deadline import client
-from xxhash import xxh3_128
 
 if TYPE_CHECKING:
     from logging import Logger
 
-    #     import boto3
     from ayon_api.typing import (
         AddonInfoDict,
         BundleInfoDict,
         DependencyPackageDict,
     )
-    from boto3.s3 import S3Client
-    from boto3.session import Session
 
 
 CHUNK_SIZE = 8192
@@ -50,8 +41,6 @@ CHUNK_SIZE = 8192
 # path delimiters for local storage
 DPKG_DELIMITER = "dpkg"
 ADDONS_DELIMITER = "addons"
-
-HashPathTuple = tuple[str, Path]
 
 
 class BundleNotFoundError(Exception):
@@ -143,7 +132,7 @@ class AddonVersionInfo:
         addon_title: str,
         addon_version: str,
         version_data: dict[str, Any],
-    ) -> Self:
+    ) -> AddonVersionInfo:
         """Addon version info.
 
         Args:
@@ -168,7 +157,7 @@ class AddonVersionInfo:
         filename: str | None = None
 
         source_info: list[dict[str, str]] = version_data.get(
-            "clientSourceInfo")
+            "clientSourceInfo", [])
         if not source_info:
             msg = (
                 f"Cannot determine source information for {full_name} addon"
@@ -211,7 +200,7 @@ class AddonInfo:
     authors: str | None = None
 
     @classmethod
-    def from_dict(cls, data: AddonInfoDict) -> Self:
+    def from_dict(cls, data: AddonInfoDict) -> AddonInfo:
         """Addon info by available versions.
 
         Args:
@@ -289,12 +278,9 @@ class AddAYONAsJobAttachment(pyblish.api.InstancePlugin):
     families: ClassVar[list[str]] = ["deadline_cloud"]
     log: Logger
 
-    def __init__(self):
+    def __init__(self) -> None:
         """Constructor."""
         super().__init__()
-        self._s3_bucket: str | None = None
-        self._s3_prefix: str | None = None
-        self._s3_client: S3Client | None = None
         self._ayon_components_cache_folder: Path | None = None
         self.resource_dir: Path | None = None
 
@@ -311,14 +297,8 @@ class AddAYONAsJobAttachment(pyblish.api.InstancePlugin):
         """
         settings = (
             instance.context.data["deadline_cloud_submitter_settings"])
-        # farm_id = settings["default_farm_id"]
-        # queue_id = settings["queue_id"]
-        # session: Session = client.api.get_boto3_session()
 
-        if settings.get("worker_platform", "linux") == "hybrid":
-            worker_platforms = {"windows", "linux"}
-        else:
-            worker_platforms = {settings.get("worker_platform", "linux")}
+        worker_platforms = set(settings.get("worker_platforms", ["linux"]))
 
         # default point to addons resources folder
         self._ayon_components_cache_folder = Path(
@@ -330,7 +310,7 @@ class AddAYONAsJobAttachment(pyblish.api.InstancePlugin):
         # if set in settings, override
         if settings.get("ayon_components_cache_folder"):
             self._ayon_components_cache_folder = Path(
-                settings["ayon_components_cache_folder"]["platform_name"])
+                settings["ayon_components_cache_folder"][platform.system().lower()])
 
         # finally, env var rules them all
         if os.getenv("AYON_COMPONENTS_CACHE_FOLDER"):
@@ -350,18 +330,6 @@ class AddAYONAsJobAttachment(pyblish.api.InstancePlugin):
         self.resource_dir = (
             self._ayon_components_cache_folder / DeadlineCloudAddon.name
         )
-
-        """
-        try:
-            self._set_s3_session(session, farm_id, queue_id)
-        except (ClientError, ValueError) as e:
-            msg = f"Failed to set up S3 session: {e}"
-            raise PublishError(msg) from e
-
-        if not self._s3_client or not self._s3_bucket or not self._s3_prefix:
-            msg = "S3 session is not properly configured."
-            raise PublishError(msg)
-        """
 
         # get the dependency package(s)
         bundle_name = os.getenv("AYON_BUNDLE_NAME")
@@ -411,27 +379,13 @@ class AddAYONAsJobAttachment(pyblish.api.InstancePlugin):
                 "assetReferences"
             ]["inputs"]["directories"]
         ).append(dpkg_dir.as_posix())
-        """
-        existing_filenames = (
-            instance.data
-            ["deadline_cloud_job_data"]
-            ["assetReferences"]
-            ["assetReferences"]
-            ["inputs"]
-            ["filenames"]
-        )
-        existing_filenames += [path.as_posix() for _, path in all_attachments]
-        self.log.debug(
-            "Adding %s as job attachments",
-            pformat([path.as_posix() for _, path in all_attachments]))
-        """
 
     def get_dependency_packages(
             self,
             bundle_name: str,
             platforms: set[str],
             project_name: str
-    ) -> list[HashPathTuple]:
+    ) -> list[Path]:
         """Get dependency packages from the server.
 
         Args:
@@ -440,7 +394,7 @@ class AddAYONAsJobAttachment(pyblish.api.InstancePlugin):
             project_name: Name of the project.
 
         Returns:
-            list of tuples with xxh3_128 has and file paths.
+            list of file paths.
 
         Raises:
             ValueError: If dependency package cannot be determined.
@@ -492,17 +446,11 @@ class AddAYONAsJobAttachment(pyblish.api.InstancePlugin):
                     raise RuntimeError(msg)
                 local_dpkg_path = Path(downloaded_dpkg)
 
-            # calculate the hash of the file
-            hasher = xxh3_128()
-            with open(local_dpkg_path, "rb") as f:
-                while chunk := f.read(CHUNK_SIZE):
-                    hasher.update(str(chunk))
-            local_hash = hasher.hexdigest()
-            result.append((local_hash, local_dpkg_path))
+            result.append(local_dpkg_path)
         return result
 
     def get_addons(
-            self, bundle_name: str, project_name: str) -> list[HashPathTuple]:
+            self, bundle_name: str, project_name: str) -> list[Path]:
         """Get addons from the server.
 
         Args:
@@ -510,13 +458,17 @@ class AddAYONAsJobAttachment(pyblish.api.InstancePlugin):
             project_name: Name of the project.
 
         Returns:
-            list of tuples with xxh3_128 has and file paths.
+            list of file paths.
 
         Raises:
             ValueError:
 
         """
         result = []
+        if not self.resource_dir:
+            msg = "Addon resource directory cannot be determined."
+            raise ValueError(msg)
+
         addons = self.get_bundle_addon_versions(
             bundle_name=bundle_name, project_name=project_name
         )
@@ -533,14 +485,18 @@ class AddAYONAsJobAttachment(pyblish.api.InstancePlugin):
 
         for addon_name, addon_version in addons.items():
             try:
-                addon_info: AddonInfo = all_addons[addon_name]
+                addon_info = all_addons[addon_name]
             except KeyError:
                 self.log.debug("Skipping %s", addon_name)
                 continue
             addon_filename = addon_info.versions[addon_version].filename
-            local_addon_path = Path(
-                get_addons_resources_dir(addon_name=DeadlineCloudAddon.name)
-            ) / ADDONS_DELIMITER / addon_info.name / addon_version / addon_filename  # noqa: E501
+            local_addon_path = (
+                self.resource_dir
+                / ADDONS_DELIMITER
+                / addon_info.name
+                / addon_version
+                / addon_filename
+            )
             if not local_addon_path.exists():
                 local_addon_path.parent.mkdir(parents=True, exist_ok=True)
                 local_addon_path = Path(ayon_api.download_addon_private_file(
@@ -558,131 +514,9 @@ class AddAYONAsJobAttachment(pyblish.api.InstancePlugin):
                     )
                     raise ValueError(msg)
 
-            # calculate the hash of the file
-            hasher = xxh3_128()
-            with open(local_addon_path, "rb") as f:
-                while chunk := f.read(CHUNK_SIZE):
-                    hasher.update(str(chunk))
-            local_hash = hasher.hexdigest()
-            result.append((local_hash, local_addon_path))
+            result.append(local_addon_path)
 
         return result
-
-    def _set_s3_session(
-            self,
-            session: Session, farm_id: str, queue_id: str) -> None:
-        """Set up S3 session.
-
-        Args:
-            session: S3 session.
-            farm_id: Farm ID.
-            queue_id: Queue ID.
-
-        """
-        (
-            bucket,
-            prefix,
-        ) = self.get_s3_settings_from_queue(
-            session, farm_id, queue_id
-        )
-
-        s3_client: S3Client = session.client("s3")
-
-        s3_client.head_bucket(Bucket=bucket)
-        self.log.info("✓ Bucket access confirmed")
-
-        self._s3_bucket = bucket
-        self._s3_prefix = prefix
-        self._s3_client = s3_client
-
-    @staticmethod
-    def hash_exists_on_s3(
-            file_hash: str, bucket: str, s3_client: S3Client) -> bool:
-        """Check if file exists on S3.
-
-        Args:
-            file_hash: File hash to check.
-            bucket: Bucket to check.
-            s3_client: S3 client.
-
-        Returns:
-            True if file exists on S3.
-
-        Raises:
-            ClientError: When S3 client encounters an error
-                other than 404 Not Found.
-        """
-        # check for the object in S3
-        s3_key = f"DeadlineCloud/Data/{file_hash}.xxh128"
-        try:
-            s3_client.head_object(
-                Bucket=bucket,
-                Key=s3_key,
-            )
-
-        except ClientError as e:
-            error_code = e.response.get("Error", {}).get("Code")
-            if error_code == "404":
-                return False
-            raise
-        else:
-            return True
-
-    @staticmethod
-    def get_s3_settings_from_queue(
-        session: Session,
-        farm_id: str,
-        queue_id: str,
-    ) -> tuple[str, str]:
-        """Get S3 settings from Deadline Cloud queue configuration.
-
-        Args:
-            session: Boto3 session
-            farm_id: Farm ID
-            queue_id: Queue ID
-
-        Returns:
-            Tuple of (bucket, prefix)
-
-        Raises:
-            ValueError: If queue doesn't have job attachments configured
-
-        """
-        deadline_client = session.client("deadline")
-
-        try:
-            response = deadline_client.get_queue(
-                farmId=farm_id,
-                queueId=queue_id,
-            )
-        except ClientError as e:
-            error_code = e.response.get("Error", {}).get("Code", "Unknown")
-            error_msg = e.response.get("Error", {}).get("Message", str(e))
-            msg = (
-                "Failed to get queue configuration "
-                f"({error_code}): {error_msg}")
-            raise ValueError(msg) from e
-
-        # Extract job attachment settings
-        job_attachment_settings = response.get("jobAttachmentSettings")
-        if not job_attachment_settings:
-            msg = (
-                f"Queue {queue_id} does not have job attachments configured. "
-                "Please configure job attachments for this queue or use "
-                "direct S3 specification.")
-            raise ValueError(msg)
-
-        bucket = job_attachment_settings.get("s3BucketName")
-        prefix = job_attachment_settings.get("rootPrefix")
-
-        if not bucket:
-            msg = "Queue job attachment settings missing s3BucketName"
-            raise ValueError(msg)
-        if not prefix:
-            msg = "Queue job attachment settings missing rootPrefix"
-            raise ValueError(msg)
-
-        return bucket, prefix
 
     @staticmethod
     def get_bundle_addon_versions(

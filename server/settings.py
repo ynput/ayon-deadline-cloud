@@ -45,7 +45,6 @@ def _worker_platform_enum() -> list[dict[str, str]]:
     return [
         {"value": "linux", "label": "Linux based workers"},
         {"value": "windows", "label": "Windows based workers"},
-        {"value": "hybrid", "label": "Hybrid setup (both windows and linux)"},
     ]
 
 
@@ -104,14 +103,15 @@ class DeadlineCloudSettings(BaseSettingsModel):
         ),
     )
 
-    worker_platform: str = SettingsField(
+    worker_platforms: list[str] = SettingsField(
         enum_resolver=_worker_platform_enum,
-        title="Worker platform",
-        default="linux",
+        title="Worker platforms",
+        default=["linux"],
         description=(
-            "Platform of the Deadline Cloud workers to target. "
-            "This is used to determine the expected platform of the job's"
-            "hosts and speedup of pre-caching AYON environment."
+            "Target platform(s) of the Deadline Cloud workers. AYON "
+            "dependency packages are pre-cached for each selected platform "
+            "so they are available on the workers that run the job. Select "
+            "both Linux and Windows for a hybrid farm."
         ),
     )
 
