@@ -10,12 +10,14 @@ both SMF and CMF where there is no AYON available.
 """
 from __future__ import annotations
 
+import json
 import os
 import platform
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 from pprint import pformat
-from typing import TYPE_CHECKING, Any, ClassVar
+from typing import TYPE_CHECKING, Any, ClassVar, cast
 from urllib.parse import urlencode
 
 import ayon_api
@@ -27,6 +29,7 @@ from ayon_deadline_cloud.addon import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping
     from logging import Logger
 
     from ayon_api.typing import (
@@ -41,6 +44,8 @@ CHUNK_SIZE = 8192
 # path delimiters for local storage
 DPKG_DELIMITER = "dpkg"
 ADDONS_DELIMITER = "addons"
+ADDONS_MANIFEST_FILENAME = "addons.json"
+DPKG_MANIFEST_FILENAME = "dependency_packages.json"
 
 
 class BundleNotFoundError(Exception):
@@ -87,6 +92,7 @@ class DependencyPackage:
     platform: str
     checksum: str
     checksum_algorithm: str
+    distributed_dt: str | None = None
     python_modules: dict[str, str] = field(default_factory=dict)
     source_addons: dict[str, str] = field(default_factory=dict)
     sources: list[dict[str, Any]] = field(default_factory=list)
@@ -109,6 +115,7 @@ class DependencyPackage:
             platform=data["platform"],
             checksum=data["checksum"],
             checksum_algorithm=data.get("checksumAlgorithm", "sha256"),
+            distributed_dt=cast("str | None", data.get("distributedDt")),
             python_modules=data.get("pythonModules") or {},
             source_addons=data.get("sourceAddons") or {},
             sources=data.get("sources") or [],
@@ -124,6 +131,7 @@ class AddonVersionInfo:
     title: str | None = None
     checksum: str | None = None
     checksum_algorithm: str | None = None
+    distributed_dt: str | None = None
 
     @classmethod
     def from_dict(
@@ -131,7 +139,7 @@ class AddonVersionInfo:
         addon_name: str,
         addon_title: str,
         addon_version: str,
-        version_data: dict[str, Any],
+        version_data: Mapping[str, object],
     ) -> AddonVersionInfo:
         """Addon version info.
 
@@ -139,7 +147,8 @@ class AddonVersionInfo:
             addon_name (str): Name of addon.
             addon_title (str): Title of addon.
             addon_version (str): Version of addon.
-            version_data (dict[str, Any]): Addon version information from
+            version_data (Mapping[str, object]): Addon version information
+                from
                 server.
 
         Returns:
@@ -156,17 +165,22 @@ class AddonVersionInfo:
         title = f"{addon_title} {addon_version}"
         filename: str | None = None
 
-        source_info: list[dict[str, str]] = version_data.get(
-            "clientSourceInfo", [])
+        source_info = version_data.get("clientSourceInfo")
+        if not isinstance(source_info, list):
+            source_info = []
         if not source_info:
             msg = (
                 f"Cannot determine source information for {full_name} addon"
             )
             raise NotClientAddonError(msg)
         for source in source_info:
-            if source["type"] == "server":
-                filename = source.get("filename")
-                break
+            if not isinstance(source, dict):
+                continue
+            if source.get("type") == "server":
+                source_filename = source.get("filename")
+                if isinstance(source_filename, str):
+                    filename = source_filename
+                    break
 
         if not filename:
             msg = (
@@ -175,16 +189,32 @@ class AddonVersionInfo:
             )
             raise ValueError(msg)
 
-        checksum = version_data.get("checksum")
-        if checksum is None:
-            checksum = version_data.get("hash")
+        checksum_obj = version_data.get("checksum")
+        if checksum_obj is None:
+            checksum_obj = version_data.get("hash")
+        checksum = checksum_obj if isinstance(checksum_obj, str) else None
+
+        checksum_alg_obj = version_data.get("checksumAlgorithm")
+        checksum_algorithm = (
+            checksum_alg_obj
+            if isinstance(checksum_alg_obj, str)
+            else "sha256"
+        )
+
+        distributed_dt_obj = version_data.get("distributedDt")
+        distributed_dt = (
+            distributed_dt_obj
+            if isinstance(distributed_dt_obj, str)
+            else None
+        )
 
         return cls(
             version=addon_version,
             full_name=full_name,
             filename=filename,
             checksum=checksum,
-            checksum_algorithm=version_data.get("checksumAlgorithm", "sha256"),
+            checksum_algorithm=checksum_algorithm,
+            distributed_dt=distributed_dt,
             title=title,
         )
 
@@ -226,9 +256,9 @@ class AddonInfo:
             name=addon_name,
             title=title,
             versions=dst_versions,
-            description=data.get("description"),
-            license=data.get("license"),
-            authors=data.get("authors")
+            description=cast("str | None", data.get("description")),
+            license=cast("str | None", data.get("license")),
+            authors=cast("str | None", data.get("authors")),
         )
 
 
@@ -267,6 +297,23 @@ def _get_project_bundle_name(
         override_name = project_bundles.get("production")
 
     return override_name or None
+
+
+def _format_distributed_dt(value: str | None) -> str:
+    """Normalize timestamp from API to ``YYYY-MM-DD HH:MM:SS`` format.
+
+    Returns:
+        str: Normalized timestamp.
+
+    """
+    if not value:
+        return datetime.now(tz=timezone.utc).strftime(  # noqa: UP017
+            "%Y-%m-%d %H:%M:%S"
+        )
+    normalized = value.replace("T", " ").replace("Z", "")
+    if "." in normalized:
+        normalized = normalized.split(".", 1)[0]
+    return normalized
 
 
 class AddAYONAsJobAttachment(pyblish.api.InstancePlugin):
@@ -338,10 +385,12 @@ class AddAYONAsJobAttachment(pyblish.api.InstancePlugin):
             raise PublishError(msg)
 
         try:
-            dependency_packages = self.get_dependency_packages(
+            dependency_packages, dependency_manifest_path = (
+                self.get_dependency_packages(
                 bundle_name=bundle_name,
                 platforms=worker_platforms,
                 project_name=instance.context.data.get("projectName")
+                )
             )
         except (ValueError, RuntimeError) as e:
             msg = f"Failed to get dependency packages: {e}"
@@ -349,7 +398,7 @@ class AddAYONAsJobAttachment(pyblish.api.InstancePlugin):
 
         # get addons and build manifest
         try:
-            addons = self.get_addons(
+            addons, addons_manifest_path = self.get_addons(
                 bundle_name=bundle_name,
                 project_name=instance.context.data.get("projectName")
             )
@@ -361,7 +410,11 @@ class AddAYONAsJobAttachment(pyblish.api.InstancePlugin):
         self.log.debug(pformat(instance.data
             ["deadline_cloud_job_data"]
             ["assetReferences"]))
-        all_attachments = dependency_packages + addons
+        all_attachments = (
+            dependency_packages
+            + addons
+            + [dependency_manifest_path, addons_manifest_path]
+        )
         instance.data["jobAttachments"] = all_attachments
         addon_dir = self.resource_dir / ADDONS_DELIMITER
         dpkg_dir = self.resource_dir / DPKG_DELIMITER
@@ -385,7 +438,7 @@ class AddAYONAsJobAttachment(pyblish.api.InstancePlugin):
             bundle_name: str,
             platforms: set[str],
             project_name: str
-    ) -> list[Path]:
+        ) -> tuple[list[Path], Path]:
         """Get dependency packages from the server.
 
         Args:
@@ -394,7 +447,8 @@ class AddAYONAsJobAttachment(pyblish.api.InstancePlugin):
             project_name: Name of the project.
 
         Returns:
-            list of file paths.
+            tuple[list[Path], Path]: Dependency package archives and
+                generated manifest file path.
 
         Raises:
             ValueError: If dependency package cannot be determined.
@@ -447,10 +501,14 @@ class AddAYONAsJobAttachment(pyblish.api.InstancePlugin):
                 local_dpkg_path = Path(downloaded_dpkg)
 
             result.append(local_dpkg_path)
-        return result
+        manifest_path = self._write_dependency_manifest(dependency_packages)
+        return result, manifest_path
 
     def get_addons(
-            self, bundle_name: str, project_name: str) -> list[Path]:
+            self,
+            bundle_name: str,
+            project_name: str,
+        ) -> tuple[list[Path], Path]:
         """Get addons from the server.
 
         Args:
@@ -458,7 +516,8 @@ class AddAYONAsJobAttachment(pyblish.api.InstancePlugin):
             project_name: Name of the project.
 
         Returns:
-            list of file paths.
+            tuple[list[Path], Path]: Addon archives and generated manifest
+                file path.
 
         Raises:
             ValueError:
@@ -483,6 +542,7 @@ class AddAYONAsJobAttachment(pyblish.api.InstancePlugin):
                 continue
             all_addons[addon_info.name] = addon_info
 
+        manifest_data: dict[str, dict[str, dict[str, Any]]] = {}
         for addon_name, addon_version in addons.items():
             try:
                 addon_info = all_addons[addon_name]
@@ -516,7 +576,73 @@ class AddAYONAsJobAttachment(pyblish.api.InstancePlugin):
 
             result.append(local_addon_path)
 
-        return result
+            version_info = addon_info.versions.get(addon_version)
+            if version_info:
+                manifest_versions = manifest_data.setdefault(addon_name, {})
+                manifest_versions[addon_version] = {
+                    "source": {
+                        "type": "server",
+                        "filename": version_info.filename,
+                        "path": None,
+                    },
+                    "checksum": version_info.checksum,
+                    "checksum_algorithm": version_info.checksum_algorithm,
+                    "distributed_dt": _format_distributed_dt(
+                        version_info.distributed_dt
+                    ),
+                }
+
+        manifest_path = self.resource_dir / ADDONS_DELIMITER / (
+            ADDONS_MANIFEST_FILENAME
+        )
+        manifest_path.parent.mkdir(parents=True, exist_ok=True)
+        with manifest_path.open("w", encoding="utf-8") as stream:
+            json.dump(manifest_data, stream, indent=4)
+
+        return result, manifest_path
+
+    def _write_dependency_manifest(
+            self,
+            dependency_packages: list[DependencyPackage],
+    ) -> Path:
+        """Generate dependency package manifest in local cache.
+
+        Args:
+            dependency_packages: Bundle dependency packages.
+
+        Returns:
+            Path: Generated manifest path.
+
+        Raises:
+            ValueError: If addon resource directory cannot be determined.
+
+        """
+        if not self.resource_dir:
+            msg = "Addon resource directory cannot be determined."
+            raise ValueError(msg)
+
+        manifest_data: dict[str, dict[str, Any]] = {}
+        for package in dependency_packages:
+            manifest_data[package.filename] = {
+                "source": {
+                    "type": "server",
+                    "filename": package.filename,
+                    "path": None,
+                },
+                "checksum": package.checksum,
+                "checksum_algorithm": package.checksum_algorithm,
+                "distributed_dt": _format_distributed_dt(
+                    package.distributed_dt
+                ),
+            }
+
+        manifest_path = self.resource_dir / DPKG_DELIMITER / (
+            DPKG_MANIFEST_FILENAME
+        )
+        manifest_path.parent.mkdir(parents=True, exist_ok=True)
+        with manifest_path.open("w", encoding="utf-8") as stream:
+            json.dump(manifest_data, stream, indent=4)
+        return manifest_path
 
     @staticmethod
     def get_bundle_addon_versions(
