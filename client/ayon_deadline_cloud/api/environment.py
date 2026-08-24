@@ -1,7 +1,54 @@
 """Tools for handling conda/rez packages."""
 from __future__ import annotations
 
+import importlib
 from typing import Any
+
+# Candidate module paths for the Blender submitter's ``_version`` module.
+# Blender ships as an addon importable under
+# ``deadline_cloud_blender_submitter`` when installed the normal way; the deep
+# ``deadline.blender_submitter.addons.…`` path only resolves in the source /
+# wheel layout. Try both. Keep in sync with
+# submitter_registry._SUBMITTER_IMPORTS["blender"].
+_BLENDER_VERSION_ADDON = "deadline_cloud_blender_submitter._version"
+_BLENDER_VERSION_SOURCE = (
+    "deadline.blender_submitter.addons"
+    ".deadline_cloud_blender_submitter._version"
+)
+_BLENDER_VERSION_MODULES: tuple[str, ...] = (
+    _BLENDER_VERSION_ADDON,
+    _BLENDER_VERSION_SOURCE,
+)
+
+
+def _import_blender_adaptor_version_tuple() -> tuple[int, ...]:
+    """Import the Blender submitter ``version_tuple``.
+
+    Tries each candidate layout in ``_BLENDER_VERSION_MODULES`` in order and
+    returns the first that resolves.
+
+    Returns:
+        The adaptor ``version_tuple``.
+
+    Raises:
+        ModuleNotFoundError: If no candidate module resolves.
+
+    """
+    last_error: ModuleNotFoundError | None = None
+    for module_path in _BLENDER_VERSION_MODULES:
+        try:
+            module = importlib.import_module(module_path)
+        except ModuleNotFoundError as exc:
+            last_error = exc
+            continue
+        return module.version_tuple
+
+    tried = ", ".join(_BLENDER_VERSION_MODULES)
+    msg = (
+        "Could not import the Blender submitter _version module. "
+        f"Tried: {tried}"
+    )
+    raise ModuleNotFoundError(msg) from last_error
 
 
 def _extract_renderers(job_template: dict[str, Any]) -> set[str]:
@@ -20,7 +67,7 @@ def _extract_renderers(job_template: dict[str, Any]) -> set[str]:
             for ef in env.get("script", {}).get("embeddedFiles", []):
                 data_str = ef.get("data", "")
                 for line in data_str.splitlines():
-                    line = line.strip()  # noqa: PLW2901
+                    line = line.strip()  # ruff:ignore[redefined-loop-name]
                     if not line.startswith("renderer:"):
                         continue
                     renderer = line.split(":", 1)[1].strip()
@@ -50,7 +97,7 @@ class HostCondaPackages:
             A list of conda packages for Maya
 
         """
-        from deadline.maya_submitter._version import (  # noqa: PLC2701
+        from deadline.maya_submitter._version import (  # ruff:ignore[import-private-name]
             version_tuple as adaptor_version_tuple,
         )
 
@@ -59,7 +106,7 @@ class HostCondaPackages:
             import maya.cmds  # ty:ignore[unresolved-import]
 
             maya_version = maya.cmds.about(version=True)
-        except Exception:  # noqa: BLE001
+        except Exception:  # ruff:ignore[blind-except]
             maya_version = None
 
         # note: this is used to get the version of the adaptor, which is
@@ -89,14 +136,14 @@ class HostCondaPackages:
 
         return packages
 
-    def _get_conda_pkgs_for_houdini(self) -> list[str]:  # noqa: PLR6301
+    def _get_conda_pkgs_for_houdini(self) -> list[str]:  # ruff:ignore[no-self-use]
         """Get a list of conda packages for Houdini.
 
         Returns:
             A list of conda packages for Houdini
 
         """
-        from deadline_cloud_for_houdini._version import (  # noqa: PLC2701
+        from deadline_cloud_for_houdini._version import (  # ruff:ignore[import-private-name]
             version_tuple as adaptor_version_tuple,
         )
 
@@ -105,7 +152,7 @@ class HostCondaPackages:
             import hou  # ty:ignore[unresolved-import]
 
             houdini_version = hou.applicationVersionString().rsplit(".", 1)[0]
-        except Exception:  # noqa: BLE001
+        except Exception:  # ruff:ignore[blind-except]
             houdini_version = None
 
         # note: this is used to get the version of the adaptor, which is
@@ -126,14 +173,50 @@ class HostCondaPackages:
 
         return packages
 
-    def _get_conda_pkgs_for_nuke(self) -> list[str]:  # noqa: PLR6301
+    def _get_conda_pkgs_for_blender(self) -> list[str]:  # ruff:ignore[no-self-use]
+        """Get a list of conda packages for Blender.
+
+        Returns:
+            A list of conda packages for Blender
+
+        """
+        adaptor_version_tuple = _import_blender_adaptor_version_tuple()
+
+        packages: list[str] = []
+        try:
+            import bpy  # ty:ignore[unresolved-import]
+
+            # https://docs.blender.org/api/current/bpy.app.html#bpy.app.version
+            blender_version = ".".join(str(v) for v in bpy.app.version[:2])
+        except Exception:  # ruff:ignore[blind-except]
+            blender_version = None
+
+        # note: this is used to get the version of the adaptor, which is
+        # not necessarily the same as the Blender version. Sometimes it happens
+        # that the version in dev build is set incorrectly? to 0.0 and then
+        # the submitted jobs will fail because that conda package can't be
+        # found in the default conda channel. This simple fix will release
+        # the version constrain in that case.
+        adaptor_version = ".".join(str(v) for v in adaptor_version_tuple[:2])
+        adaptor_version = f"={adaptor_version}.*"
+        if adaptor_version_tuple[0] == 0 and adaptor_version_tuple[1] == 0:
+            adaptor_version = ""
+        packages.extend(
+            (
+                f"blender={blender_version}.*",
+                f"blender-openjd{adaptor_version}",
+            ))
+
+        return packages
+
+    def _get_conda_pkgs_for_nuke(self) -> list[str]:  # ruff:ignore[no-self-use]
         """Get a list of conda packages for Nuke.
 
         Returns:
             A list of conda packages for Nuke
 
         """
-        from deadline.nuke_submitter._version import (  # noqa: PLC2701
+        from deadline.nuke_submitter._version import (  # ruff:ignore[import-private-name]
             version_tuple as adaptor_version_tuple,
         )
 
@@ -142,7 +225,7 @@ class HostCondaPackages:
             import nuke  # ty:ignore[unresolved-import]
 
             nuke_version = nuke.NUKE_VERSION_MAJOR
-        except Exception:  # noqa: BLE001
+        except Exception:  # ruff:ignore[blind-except]
             nuke_version = None
 
         # note: this is used to get the version of the adaptor, which is
