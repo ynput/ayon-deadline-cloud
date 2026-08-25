@@ -4,11 +4,12 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Optional
+from typing import TYPE_CHECKING, Any, Optional, cast
 
 import click
 from ayon_core.addon import AYONAddon, IPluginPaths, click_wrap
 
+from ayon_deadline_cloud.api.datatypes import PublishManifest
 from ayon_deadline_cloud.api.publish import publish_content
 
 from .version import __version__
@@ -23,11 +24,11 @@ class DeadlineCloudAddon(AYONAddon, IPluginPaths):
     """Deadline Cloud Addon for AYON."""
     name = "deadline_cloud"
     version = __version__
-    log: Logger
+    log: Logger  # type: ignore[assignment]
 
     @staticmethod
     def add_implementation_envs(
-        env: dict[str, str], _app: Any) -> None:  # noqa: ANN401
+        env: dict[str, str], _app: Any) -> None:  # ruff: ignore[any-type]
         """Add environment variables for the addon implementation.
 
         Args:
@@ -41,10 +42,10 @@ class DeadlineCloudAddon(AYONAddon, IPluginPaths):
         # Deadline Cloud configuration file path for the client to use.
         # env["DEADLINE_CONFIG_FILE_PATH"] = ...
 
-    def get_publish_plugin_paths(  # noqa: PLR6301
+    def get_publish_plugin_paths(  # ruff: ignore[no-self-use]
             self,
             host_name: str,
-    ) -> list[str]:  # ty:ignore[invalid-method-override]
+    ) -> list[str]:
         """Return list of paths to publish plugins.
 
         Args:
@@ -58,7 +59,7 @@ class DeadlineCloudAddon(AYONAddon, IPluginPaths):
         return [os.path.join(
             DEADLINE_CLOUD_ADDON_ROOT, "plugins", "publish")]
 
-    def get_create_plugin_paths(  # noqa: PLR6301
+    def get_create_plugin_paths(  # ruff: ignore[no-self-use]
             self,
             host_name: str,
     ) -> list[str]:
@@ -76,45 +77,54 @@ class DeadlineCloudAddon(AYONAddon, IPluginPaths):
             DEADLINE_CLOUD_ADDON_ROOT,
             "plugins", "create", host_name or "global")]
 
-    def _publish(  # noqa: PLR0913, PLR0917
+    def _publish(
             self,
-            path: str,
-            folder_path: str,
-            project_name: str,
-            user_name: str,
-            product_base_type: str,
-            variant: str,
-            task_name: Optional[str],
-            host_name: Optional[str],
-            source_file: Optional[str],
+            path: Optional[str],
             path_mapping_file: Optional[str],
+            publish_data: Optional[str] = None,
     ) -> None:
         """Publish the result of a Deadline Cloud processed job.
+
+        Values are primarily taken from the publish manifest
+        (``--publish-data``). The individual options are deprecated
+        overrides kept for jobs submitted by older addon versions.
 
         Args:
             path: Path to the folder containing the job
                 result to publish.
-            folder_path: Folder path for the context on AYON.
-            project_name: Name of the project associated with the job result.
-            user_name: Name of the user who submitted the job.
-            product_base_type: Base name of the product to publish.
-                Note that currently it is overridden down the line
-                with hardcoded `render` - in the future, product base type
-                should be passed correctly to support other publish
-                types.
-            variant: Product variant.
-            task_name: Optional name of the task associated with
-                the job result.
-            host_name: Optional name of the host application associated with
-                the job result.
-            source_file: Optional path to a source file related to the job
-                result, which might be used for validation or as part of
-                the publishing process.
             path_mapping_file: Optional path to a file containing path mapping
                 rules, which can be used to resolve file paths during
                 the publishing process.
+            publish_data: Path to the AYON publish manifest shipped with
+                the job as an attachment.
+
+        Raises:
+            ValueError: When required publishing context cannot be resolved.
 
         """
+        manifest: Optional[PublishManifest] = None
+        if publish_data:
+            manifest = PublishManifest.from_file(publish_data)
+            self.log.debug(
+                "loaded publish manifest v%s from: %s",
+                manifest.schemaVersion, publish_data
+            )
+            ctx = manifest.context
+            path = path or ctx.outputPath
+            folder_path = ctx.folderPath
+            project_name = ctx.projectName
+            user_name = ctx.userName
+            product_base_type = ctx.productBaseType
+            variant = ctx.variant
+            task_name = ctx.taskName
+            host_name = ctx.hostName
+            source_file = ctx.sourceFile
+        else:
+            self.log.warning(
+                "No publish manifest provided, falling back to deprecated "
+                "individual CLI options."
+            )
+
         self.log.debug(
             "publish called with arguments: "
             "folder_path=%s, project_name=%s, "
@@ -124,6 +134,27 @@ class DeadlineCloudAddon(AYONAddon, IPluginPaths):
             product_base_type, task_name, host_name, source_file,
             variant
         )
+
+        missing = [
+            name
+            for name, value in (
+                ("path", path),
+                ("folder-path", folder_path),
+                ("project-name", project_name),
+                ("user-name", user_name),
+                ("product-base-type", product_base_type),
+                ("variant", variant),
+            )
+            if not value
+        ]
+        if missing:
+            msg = (
+                "Missing required publishing context: "
+                f"{', '.join(missing)}"
+            )
+            raise ValueError(msg)
+
+        path = cast("str", path)
 
         # This is simple remapping code to take the path specified in the job
         # and remap it to current system. Deadline Cloud won't do it
@@ -191,41 +222,10 @@ class DeadlineCloudAddon(AYONAddon, IPluginPaths):
                 "processed job."
             ),
         ).option(
-            "-f",
-            "--folder-path",
-            type=click.STRING,
-            required=True,
-        ).option(
-            "-t",
-            "--task-name",
-            type=click.STRING,
+            "--publish-data",
+            type=click.Path(exists=True, file_okay=True, dir_okay=False),
             required=False,
-        ).option(
-            "-p",
-            "--project-name",
-            type=click.STRING,
-            required=True,
-        ).option(
-            "-u",
-            "--user-name",
-            type=click.STRING,
-            required=True,
-        ).option(
-            "--host-name",
-            type=click.STRING,
-            required=False,
-        ).option(
-            "--product-base-type",
-            type=click.STRING,
-            required=True
-        ).option(
-            "--variant",
-            type=click.STRING,
-            required=True
-        ).option(
-            "-s",
-            "--source-file",
-            type=click.Path(exists=False, file_okay=True, dir_okay=False),
+            help="Path to the AYON publish manifest.",
         ).option(
             "--path-mapping-file",
             type=click.Path(exists=True, file_okay=True, dir_okay=False),
@@ -233,6 +233,7 @@ class DeadlineCloudAddon(AYONAddon, IPluginPaths):
         ).argument(
             "path",
             nargs=1,
+            required=False,
             type=click.Path(exists=False, file_okay=False, dir_okay=True),
         )
 
