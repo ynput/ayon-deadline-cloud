@@ -30,8 +30,8 @@ class AddPublishingStep(pyblish.api.InstancePlugin):
     label = "Add Publishing Step to the Job Template"
     # make sure it runs after the data is collected
     order = pyblish.api.IntegratorOrder
-    targets: ClassVar[list[str]] = ["local"]
-    families: ClassVar[list[str]] = ["deadline_cloud"]
+    targets: ClassVar[list[str]] = ["local"]  # ty: ignore[invalid-attribute-override]
+    families: ClassVar[list[str]] = ["deadline_cloud"]  # ty: ignore[invalid-attribute-override]
     log: Logger
 
     def process(self, instance: pyblish.api.Instance) -> None:
@@ -65,13 +65,17 @@ class AddPublishingStep(pyblish.api.InstancePlugin):
             msg = "Job template is missing 'steps' key"
             raise PublishError(msg) from e
 
-        self._add_launcher_storage_path(job_template)
+        # self._add_launcher_storage_path(job_template)
         self._add_render_roles_to_steps(render_roles, steps)
         self._add_publishing_step(publish_roles, steps)
 
     @staticmethod
     def _add_launcher_storage_path(job_template: dict) -> None:
         """Add launcher storage path to job template.
+
+        Launcher storage path is used to store the addon and dependency
+        packages on the worker machine. The publish step will use this
+        path to find the necessary packages.
 
         Args:
             job_template (dict): Job template.
@@ -85,7 +89,7 @@ class AddPublishingStep(pyblish.api.InstancePlugin):
             "name": "launcherStoragePath",
             "type": "PATH",
             "objectType": "DIRECTORY",
-            "dataFlow": "OUT"
+            "dataFlow": "OUT",
         })
 
     def _add_render_roles_to_steps(
@@ -160,9 +164,6 @@ class AddPublishingStep(pyblish.api.InstancePlugin):
                             os.environ["AYON_STUDIO_BUNDLE_NAME"]
                         ),
                         "AYON_BUNDLE_NAME": os.environ["AYON_BUNDLE_NAME"],
-                        "AYON_LAUNCHER_STORAGE_DIR": (
-                            "{{Param.launcherStoragePath}}"
-                        ),
                     },
                 },
             ],
@@ -188,11 +189,12 @@ import shutil
 import zipfile
 from pathlib import Path
 
+
 storage_root = os.environ.get("AYON_LAUNCHER_STORAGE_DIR")
 if not storage_root:
-    raise RuntimeError(
-        "AYON_LAUNCHER_STORAGE_DIR must be set for publish step"
-    )
+    # create default storage path in the user's home directory
+    storage_root = Path.home() / ".ayon" / "deadline_cloud_storage"
+    os.environ["AYON_LAUNCHER_STORAGE_DIR"] = str(storage_root)
 
 storage_dir = Path(storage_root).expanduser().resolve()
 addon_storage_dir = storage_dir / "addon"
@@ -251,16 +253,8 @@ PY
 
 echo "Running publish step for AYON Deadline Cloud addon..."
 ayon --debug addon deadline_cloud publish \
- --folder-path "{{Param.folderPath}}" \
- --task-name "{{Param.taskName}}" \
- --project-name "{{Param.projectName}}" \
- --user-name "{{Param.userName}}" \
- --host-name "{{Param.hostName}}" \
- --product-base-type "{{Param.productBaseType}}" \
- --variant "{{Param.variant}}" \
- --source-file "{{Param.sourceFile}}" \
- --path-mapping-file "{{Session.PathMappingRulesFile}}" \
- "{{Param.OutputFilePath}}"
+ --publish-data "{{Param.ayonPublishData}}" \
+ --path-mapping-file "{{Session.PathMappingRulesFile}}"
                         """,
                     }
                 ],
