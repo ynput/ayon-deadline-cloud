@@ -307,7 +307,7 @@ def _format_distributed_dt(value: str | None) -> str:
 
     """
     if not value:
-        return datetime.now(tz=timezone.utc).strftime(  # noqa: UP017
+        return datetime.now(tz=timezone.utc).strftime(  # ruff: ignore[datetime-timezone-utc]
             "%Y-%m-%d %H:%M:%S"
         )
     normalized = value.replace("T", " ").replace("Z", "")
@@ -321,8 +321,8 @@ class AddAYONAsJobAttachment(pyblish.api.InstancePlugin):
     label = "Add AYON Components as a job attachment"
     # make sure it runs after the data is collected
     order = pyblish.api.IntegratorOrder
-    targets: ClassVar[list[str]] = ["local"]
-    families: ClassVar[list[str]] = ["deadline_cloud"]
+    targets: ClassVar[list[str]] = ["local"]  # ty: ignore[invalid-attribute-override]
+    families: ClassVar[list[str]] = ["deadline_cloud"]  # ty: ignore[invalid-attribute-override]
     log: Logger
 
     def __init__(self) -> None:
