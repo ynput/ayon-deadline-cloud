@@ -19,6 +19,8 @@ dependencies = [
     "pytest",
     "codespell",
     "pyblish-base>=1.8.12",
+    "deadline-cloud",
+    "ayon-python-api",
 ]
 
 [tool.ty.environment]

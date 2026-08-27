@@ -30,8 +30,8 @@ class AddPublishingStep(pyblish.api.InstancePlugin):
     label = "Add Publishing Step to the Job Template"
     # make sure it runs after the data is collected
     order = pyblish.api.IntegratorOrder
-    targets: ClassVar[list[str]] = ["local"]
-    families: ClassVar[list[str]] = ["deadline_cloud"]
+    targets: ClassVar[list[str]] = ["local"]  # ty: ignore[invalid-attribute-override]
+    families: ClassVar[list[str]] = ["deadline_cloud"]  # ty: ignore[invalid-attribute-override]
     log: Logger
 
     def process(self, instance: pyblish.api.Instance) -> None:
@@ -65,8 +65,32 @@ class AddPublishingStep(pyblish.api.InstancePlugin):
             msg = "Job template is missing 'steps' key"
             raise PublishError(msg) from e
 
+        # self._add_launcher_storage_path(job_template)
         self._add_render_roles_to_steps(render_roles, steps)
         self._add_publishing_step(publish_roles, steps)
+
+    @staticmethod
+    def _add_launcher_storage_path(job_template: dict) -> None:
+        """Add launcher storage path to job template.
+
+        Launcher storage path is used to store the addon and dependency
+        packages on the worker machine. The publish step will use this
+        path to find the necessary packages.
+
+        Args:
+            job_template (dict): Job template.
+
+        """
+        if not job_template.get("parameterDefinitions"):
+            job_template["parameterDefinitions"] = []
+
+        param_definitions: list[dict] = job_template["parameterDefinitions"]
+        param_definitions.append({
+            "name": "launcherStoragePath",
+            "type": "PATH",
+            "objectType": "DIRECTORY",
+            "dataFlow": "OUT",
+        })
 
     def _add_render_roles_to_steps(
             self, render_roles: list[str], steps: list[dict]) -> None:
@@ -158,18 +182,79 @@ pwd
 echo "File path mapping:"
 cat "{{Session.PathMappingRulesFile}}"
 
+echo "Preparing AYON launcher storage from job attachments..."
+python - <<'PY'
+import os
+import shutil
+import zipfile
+from pathlib import Path
+
+
+storage_root = os.environ.get("AYON_LAUNCHER_STORAGE_DIR")
+if not storage_root:
+    # create default storage path in the user's home directory
+    storage_root = Path.home() / ".ayon" / "deadline_cloud_storage"
+    os.environ["AYON_LAUNCHER_STORAGE_DIR"] = str(storage_root)
+
+storage_dir = Path(storage_root).expanduser().resolve()
+addon_storage_dir = storage_dir / "addon"
+dpkg_storage_dir = storage_dir / "dependency_packages"
+addon_storage_dir.mkdir(parents=True, exist_ok=True)
+dpkg_storage_dir.mkdir(parents=True, exist_ok=True)
+
+def extract_archive(archive_path: Path, target_dir: Path) -> None:
+    if target_dir.exists():
+        shutil.rmtree(target_dir)
+    target_dir.mkdir(parents=True, exist_ok=True)
+    with zipfile.ZipFile(archive_path, "r") as zip_file:
+        zip_file.extractall(target_dir)
+    print(f"Extracted {archive_path} -> {target_dir}")
+
+
+def copy_manifest(
+    manifest_path: Path,
+    target_dir: Path,
+    target_name: str,
+) -> None:
+    target_dir.mkdir(parents=True, exist_ok=True)
+    destination = target_dir / target_name
+    shutil.copy2(manifest_path, destination)
+    print(f"Copied manifest {manifest_path} -> {destination}")
+
+cwd = Path.cwd()
+
+for archive_path in cwd.rglob("*.zip"):
+    parts = archive_path.parts
+    if "addons" in parts:
+        addons_index = parts.index("addons")
+        if len(parts) > addons_index + 3:
+            addon_name = parts[addons_index + 1]
+            addon_version = parts[addons_index + 2]
+            target_dir = addon_storage_dir / f"{addon_name}_{addon_version}"
+            extract_archive(archive_path, target_dir)
+    elif "dpkg" in parts:
+        target_dir = dpkg_storage_dir / archive_path.name
+        extract_archive(archive_path, target_dir)
+
+for manifest_path in cwd.rglob("*.json"):
+    parts = manifest_path.parts
+    if "addons" in parts and manifest_path.name == "addons.json":
+        copy_manifest(manifest_path, addon_storage_dir, "addons.json")
+    elif (
+        "dpkg" in parts
+        and manifest_path.name == "dependency_packages.json"
+    ):
+        copy_manifest(
+            manifest_path,
+            dpkg_storage_dir,
+            "dependency_packages.json",
+        )
+PY
+
 echo "Running publish step for AYON Deadline Cloud addon..."
 ayon --debug addon deadline_cloud publish \
- --folder-path "{{Param.folderPath}}" \
- --task-name "{{Param.taskName}}" \
- --project-name "{{Param.projectName}}" \
- --user-name "{{Param.userName}}" \
- --host-name "{{Param.hostName}}" \
- --product-base-type "{{Param.productBaseType}}" \
- --variant "{{Param.variant}}" \
- --source-file "{{Param.sourceFile}}" \
- --path-mapping-file "{{Session.PathMappingRulesFile}}" \
- "{{Param.OutputFilePath}}"
+ --publish-data "{{Param.ayonPublishData}}" \
+ --path-mapping-file "{{Session.PathMappingRulesFile}}"
                         """,
                     }
                 ],
